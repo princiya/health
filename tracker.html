@@ -68,17 +68,21 @@
         const APP_ID = "health-streak-web"; 
 
         // --- Helper: Date Formatting (YYYY-MM-DD) ---
-        const getTodayString = () => {
-            const date = new Date();
+        // consistently use local time for both storage keys and streak calculation
+        const getFormattedDate = (date) => {
             const year = date.getFullYear();
             const month = String(date.getMonth() + 1).padStart(2, '0');
             const day = String(date.getDate()).padStart(2, '0');
             return `${year}-${month}-${day}`;
         };
 
+        const getTodayString = () => getFormattedDate(new Date());
+
         const formatDateReadable = (dateStr) => {
+            // Fix timezone issue in display by appending time to ensure it parses as local
+            const date = new Date(dateStr + "T00:00:00");
             const options = { weekday: 'long', month: 'short', day: 'numeric' };
-            return new Date(dateStr).toLocaleDateString(undefined, options);
+            return date.toLocaleDateString(undefined, options);
         };
 
         // --- Helper: UTF-8 to Base64 ---
