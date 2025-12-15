@@ -245,6 +245,7 @@
             };
 
             const handlePublish = async () => {
+                console.log("Starting Publish Process...");
                 if (!postText.trim()) {
                     showNotification("Write something before publishing!", "error");
                     return;
@@ -265,6 +266,8 @@
                 const isTodayComplete = todaysStats.exercise && todaysStats.eating;
                 const currentStreakCount = streakStats + (isTodayComplete ? 0 : 1);
                 
+                // Use timestamp in filename to allow multiple posts per day
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
                 const title = `Day ${currentStreakCount}: Run Log`;
                 const markdownContent = `---
 title: "${title}"
@@ -284,6 +287,8 @@ ${postText}
 
                 try {
                     // Backup to Firestore
+                    console.log("Saving to Firestore...");
+                    // Note: We use merge: true to avoid overwriting unrelated fields
                     await setDoc(
                         doc(fb.db, 'artifacts', APP_ID, 'users', user.uid, 'checkins', today), 
                         { note: postText }, 
@@ -291,28 +296,16 @@ ${postText}
                     );
 
                     // Push to GitHub
+                    console.log("Pushing to GitHub...");
                     const isFineGrained = token.startsWith('github_pat_');
                     const authHeader = isFineGrained ? `Bearer ${token}` : `token ${token}`;
 
-                    const fileName = `${today}-streak-log.md`;
+                    // NEW LOGIC: Unique filename = always create new file = NO GET REQUEST NEEDED
+                    const fileName = `${today}-${timestamp}-log.md`;
                     const cleanFolder = ghConfig.folder.trim().replace(/\/$/, '');
                     const filePath = cleanFolder ? `${cleanFolder}/${fileName}` : fileName;
                     const apiUrl = `https://api.github.com/repos/${repo}/contents/${filePath}`;
                     
-                    let sha = null;
-                    try {
-                        const getRes = await fetch(apiUrl, {
-                            headers: { 
-                                'Authorization': authHeader,
-                                'Accept': 'application/vnd.github.v3+json'
-                            }
-                        });
-                        if (getRes.ok) {
-                            const getData = await getRes.json();
-                            sha = getData.sha;
-                        }
-                    } catch (e) {}
-
                     const putRes = await fetch(apiUrl, {
                         method: 'PUT',
                         headers: {
@@ -322,8 +315,8 @@ ${postText}
                         body: JSON.stringify({
                             message: `Add log for ${today} (Streak: ${currentStreakCount})`,
                             content: utf8_to_b64(markdownContent),
-                            branch: ghConfig.branch.trim() || 'main',
-                            sha: sha
+                            branch: ghConfig.branch.trim() || 'main'
+                            // No 'sha' needed because we are creating a new file
                         })
                     });
 
@@ -332,10 +325,11 @@ ${postText}
                         throw new Error(errData.message || "GitHub API Error");
                     }
 
+                    console.log("Publish Success!");
                     showNotification("Committed to GitHub!", "success");
                     setPostText("");
                 } catch (error) {
-                    console.error(error);
+                    console.error("Publish Error:", error);
                     showNotification(`Publish failed: ${error.message}`, "error");
                 } finally {
                     setPublishing(false);
@@ -354,6 +348,7 @@ ${postText}
                 setTimeout(() => setNotification(null), 3000);
             };
 
+            // --- Definitions for View ---
             const today = getTodayString();
             const todayData = checkins[today] || { exercise: false, eating: false };
 
