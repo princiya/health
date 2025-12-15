@@ -354,6 +354,9 @@ ${postText}
                 setTimeout(() => setNotification(null), 3000);
             };
 
+            const today = getTodayString();
+            const todayData = checkins[today] || { exercise: false, eating: false };
+
             // --- Views ---
 
             // SETUP VIEW (Shown if no Firebase Config)
