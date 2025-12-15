@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HealthStreak Tracker</title>
+    
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. React & ReactDOM -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.292.0?deps=react@18.2.0",
+            "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+            "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+            "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js"
+        }
+    }
+    </script>
+    
+    <!-- 3. Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        body { background-color: #171717; color: white; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            onAuthStateChanged 
+        } from 'firebase/auth';
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            setDoc, 
+            onSnapshot, 
+            query, 
+            serverTimestamp 
+        } from 'firebase/firestore';
+        import { 
+            Activity, 
+            Utensils, 
+            Send, 
+            Settings, 
+            Flame, 
+            CheckCircle2, 
+            XCircle, 
+            AlertTriangle, 
+            Loader2, 
+            Github,
+            KeyRound,
+            LogOut
+        } from 'lucide-react';
+
+        const APP_ID = "health-streak-web"; 
+
+        // --- Helper: Date Formatting (YYYY-MM-DD) ---
+        const getTodayString = () => {
+            const date = new Date();
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
+        const formatDateReadable = (dateStr) => {
+            const options = { weekday: 'long', month: 'short', day: 'numeric' };
+            return new Date(dateStr).toLocaleDateString(undefined, options);
+        };
+
+        // --- Helper: UTF-8 to Base64 ---
+        const utf8_to_b64 = (str) => {
+            return window.btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function(match, p1) {
+                return String.fromCharCode('0x' + p1);
+            }));
+        };
+
+        function App() {
+            // Firebase Instances State
+            const [fb, setFb] = useState({ app: null, auth: null, db: null });
+            const [isConfigured, setIsConfigured] = useState(false);
+            
+            // App Data State
+            const [user, setUser] = useState(null);
+            const [checkins, setCheckins] = useState({});
+            const [loading, setLoading] = useState(true);
+            const [publishing, setPublishing] = useState(false);
+            const [postText, setPostText] = useState('');
+            const [showSettings, setShowSettings] = useState(false);
+            const [notification, setNotification] = useState(null);
+            const [configInput, setConfigInput] = useState('');
+
+            // GitHub Config State
+            const [ghConfig, setGhConfig] = useState({
+                repo: '',
+                token: '',
+                branch: 'main',
+                folder: '_posts' 
+            });
+
+            // 1. Initialization (Check for Config)
+            useEffect(() => {
+                const savedConfig = localStorage.getItem('hs_firebase_config');
+                if (savedConfig) {
+                    try {
+                        const config = JSON.parse(savedConfig);
+                        const app = initializeApp(config);
+                        const auth = getAuth(app);
+                        const db = getFirestore(app);
+                        setFb({ app, auth, db });
+                        setIsConfigured(true);
+                    } catch (e) {
+                        console.error("Invalid Config Found", e);
+                        localStorage.removeItem('hs_firebase_config');
+                        setLoading(false);
+                    }
+                } else {
+                    setLoading(false);
+                }
+            }, []);
+
+            // 2. Authentication (Only runs if configured)
+            useEffect(() => {
+                if (!fb.auth) return;
+
+                signInAnonymously(fb.auth).catch(err => console.error("Auth Failed", err));
+                const unsubscribe = onAuthStateChanged(fb.auth, (currentUser) => {
+                    setUser(currentUser);
+                    const savedGhConfig = localStorage.getItem('healthStreakGhConfig');
+                    if (savedGhConfig) {
+                        setGhConfig(JSON.parse(savedGhConfig));
+                    }
+                });
+                return () => unsubscribe();
+            }, [fb.auth]);
+
+            // 3. Data Sync (Only runs if user exists)
+            useEffect(() => {
+                if (!user || !fb.db) return;
+
+                const q = query(
+                    collection(fb.db, 'artifacts', APP_ID, 'users', user.uid, 'checkins')
+                );
+
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    const data = {};
+                    snapshot.forEach((doc) => {
+                        data[doc.id] = doc.data();
+                    });
+                    setCheckins(data);
+                    setLoading(false);
+                }, (error) => {
+                    console.error("Firestore Error:", error);
+                    showNotification("Error syncing data.", "error");
+                });
+
+                return () => unsubscribe();
+            }, [user, fb.db]);
+
+            // 4. Streak Logic
+            const streakStats = useMemo(() => {
+                const today = getTodayString();
+                let currentStreak = 0;
+                let dateCheck = new Date();
+                
+                while (true) {
+                    const dateStr = dateCheck.toISOString().split('T')[0];
+                    const data = checkins[dateStr];
+                    
+                    if (data && data.exercise && data.eating) {
+                        currentStreak++;
+                        dateCheck.setDate(dateCheck.getDate() - 1);
+                    } else if (dateStr === today) {
+                        dateCheck.setDate(dateCheck.getDate() - 1);
+                    } else {
+                        break;
+                    }
+                }
+                return currentStreak;
+            }, [checkins]);
+
+            // 5. Actions
+            const handleSaveConfig = () => {
+                try {
+                    // Try to parse input roughly
+                    let cleanInput = configInput.trim();
+                    // If user pasted "const firebaseConfig = { ... }", clean it
+                    if (cleanInput.includes("=")) {
+                        cleanInput = cleanInput.split("=")[1].trim();
+                        if (cleanInput.endsWith(";")) cleanInput = cleanInput.slice(0, -1);
+                    }
+                    
+                    const config = JSON.parse(cleanInput);
+                    if (!config.apiKey || !config.projectId) throw new Error("Missing required fields");
+
+                    localStorage.setItem('hs_firebase_config', JSON.stringify(config));
+                    window.location.reload(); // Reload to initialize cleanly
+                } catch (e) {
+                    showNotification("Invalid JSON Configuration", "error");
+                }
+            };
+
+            const handleResetApp = () => {
+                if(confirm("This will remove all stored keys (Firebase & GitHub) from this browser. You will need to set them up again.")) {
+                    localStorage.removeItem('hs_firebase_config');
+                    localStorage.removeItem('healthStreakGhConfig');
+                    window.location.reload();
+                }
+            };
+
+            const handleCheckin = async (type) => {
+                if (!user || !fb.db) return;
+                const today = getTodayString();
+                const currentData = checkins[today] || { exercise: false, eating: false };
+                
+                const newData = {
+                    ...currentData,
+                    [type]: !currentData[type],
+                    timestamp: serverTimestamp()
+                };
+
+                try {
+                    await setDoc(
+                        doc(fb.db, 'artifacts', APP_ID, 'users', user.uid, 'checkins', today), 
+                        newData, 
+                        { merge: true }
+                    );
+                } catch (err) {
+                    console.error(err);
+                    showNotification("Failed to save check-in", "error");
+                }
+            };
+
+            const handlePublish = async () => {
+                if (!postText.trim()) {
+                    showNotification("Write something before publishing!", "error");
+                    return;
+                }
+                const repo = ghConfig.repo.trim();
+                const token = ghConfig.token.trim();
+
+                if (!repo || !token) {
+                    setShowSettings(true);
+                    showNotification("Configure GitHub settings first", "error");
+                    return;
+                }
+
+                setPublishing(true);
+                const today = getTodayString();
+                const todaysStats = checkins[today] || { exercise: false, eating: false };
+                
+                const isTodayComplete = todaysStats.exercise && todaysStats.eating;
+                const currentStreakCount = streakStats + (isTodayComplete ? 0 : 1);
+                
+                const title = `Day ${currentStreakCount}: Run Log`;
+                const markdownContent = `---
+title: "${title}"
+date: ${today}
+streak: ${currentStreakCount}
+tags: [run-log, health-streak]
+---
+
+${postText}
+
+---
+**Daily Stats:**
+- 🔥 Streak: ${currentStreakCount} Days
+- ✅ Exercise: ${todaysStats.exercise ? 'Done' : 'Pending'}
+- 🥗 Eating: ${todaysStats.eating ? 'Healthy' : 'Pending'}
+`;
+
+                try {
+                    // Backup to Firestore
+                    await setDoc(
+                        doc(fb.db, 'artifacts', APP_ID, 'users', user.uid, 'checkins', today), 
+                        { note: postText }, 
+                        { merge: true }
+                    );
+
+                    // Push to GitHub
+                    const isFineGrained = token.startsWith('github_pat_');
+                    const authHeader = isFineGrained ? `Bearer ${token}` : `token ${token}`;
+
+                    const fileName = `${today}-streak-log.md`;
+                    const cleanFolder = ghConfig.folder.trim().replace(/\/$/, '');
+                    const filePath = cleanFolder ? `${cleanFolder}/${fileName}` : fileName;
+                    const apiUrl = `https://api.github.com/repos/${repo}/contents/${filePath}`;
+                    
+                    let sha = null;
+                    try {
+                        const getRes = await fetch(apiUrl, {
+                            headers: { 
+                                'Authorization': authHeader,
+                                'Accept': 'application/vnd.github.v3+json'
+                            }
+                        });
+                        if (getRes.ok) {
+                            const getData = await getRes.json();
+                            sha = getData.sha;
+                        }
+                    } catch (e) {}
+
+                    const putRes = await fetch(apiUrl, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': authHeader,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            message: `Add log for ${today} (Streak: ${currentStreakCount})`,
+                            content: utf8_to_b64(markdownContent),
+                            branch: ghConfig.branch.trim() || 'main',
+                            sha: sha
+                        })
+                    });
+
+                    if (!putRes.ok) {
+                        const errData = await putRes.json();
+                        throw new Error(errData.message || "GitHub API Error");
+                    }
+
+                    showNotification("Committed to GitHub!", "success");
+                    setPostText("");
+                } catch (error) {
+                    console.error(error);
+                    showNotification(`Publish failed: ${error.message}`, "error");
+                } finally {
+                    setPublishing(false);
+                }
+            };
+
+            const saveSettings = (e) => {
+                e.preventDefault();
+                localStorage.setItem('healthStreakGhConfig', JSON.stringify(ghConfig));
+                setShowSettings(false);
+                showNotification("Settings saved", "success");
+            };
+
+            const showNotification = (msg, type) => {
+                setNotification({ msg, type });
+                setTimeout(() => setNotification(null), 3000);
+            };
+
+            // --- Views ---
+
+            // SETUP VIEW (Shown if no Firebase Config)
+            if (!isConfigured) {
+                return (
+                    <div className="min-h-screen bg-neutral-900 text-white p-6 flex items-center justify-center">
+                        <div className="max-w-md w-full space-y-6">
+                            <div className="text-center">
+                                <KeyRound className="w-12 h-12 text-green-500 mx-auto mb-4" />
+                                <h1 className="text-2xl font-bold">Setup HealthStreak</h1>
+                                <p className="text-neutral-400 text-sm mt-2">
+                                    To keep your keys safe and out of the public code, please paste your 
+                                    Firebase configuration object here. It will be stored in your browser.
+                                </p>
+                            </div>
+                            
+                            <div className="space-y-2">
+                                <label className="text-sm font-bold text-neutral-300">Firebase Config (JSON)</label>
+                                <textarea 
+                                    className="w-full h-48 bg-neutral-800 border border-neutral-700 rounded-lg p-3 text-xs font-mono text-neutral-300 focus:ring-2 focus:ring-green-500 outline-none"
+                                    placeholder='{ "apiKey": "...", "authDomain": "...", ... }'
+                                    value={configInput}
+                                    onChange={(e) => setConfigInput(e.target.value)}
+                                />
+                                <p className="text-xs text-neutral-500">
+                                    Found in Firebase Console &gt; Project Settings &gt; General &gt; Your Apps.
+                                </p>
+                            </div>
+
+                            <button onClick={handleSaveConfig} className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-lg transition-colors">
+                                Save & Start App
+                            </button>
+                        </div>
+                        {notification && (
+                            <div className="fixed top-6 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full bg-red-500 text-white shadow-xl z-50 font-bold text-sm">
+                                {notification.msg}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // LOADING VIEW
+            if (loading) return (
+                <div className="flex items-center justify-center h-screen bg-neutral-900 text-white">
+                    <Loader2 className="animate-spin w-10 h-10 text-green-500" />
+                </div>
+            );
+
+            // SETTINGS VIEW
+            if (showSettings) {
+                return (
+                    <div className="min-h-screen bg-neutral-900 text-white p-6">
+                        <div className="max-w-md mx-auto">
+                            <div className="flex justify-between items-center mb-8">
+                                <h2 className="text-2xl font-bold flex items-center gap-2">
+                                    <Github className="w-6 h-6"/> GitHub Settings
+                                </h2>
+                                <button onClick={() => setShowSettings(false)} className="text-neutral-400 hover:text-white">
+                                    <XCircle />
+                                </button>
+                            </div>
+                            
+                            <form onSubmit={saveSettings} className="space-y-6">
+                                <div>
+                                    <label className="block text-sm text-neutral-400 mb-2">Repository (username/repo)</label>
+                                    <input type="text" required className="w-full bg-neutral-800 border border-neutral-700 rounded p-3 text-white focus:ring-2 focus:ring-green-500 outline-none" placeholder="e.g., johndoe/my-blog" value={ghConfig.repo} onChange={(e) => setGhConfig({...ghConfig, repo: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="block text-sm text-neutral-400 mb-2">Personal Access Token (PAT)</label>
+                                    <input type="password" required className="w-full bg-neutral-800 border border-neutral-700 rounded p-3 text-white focus:ring-2 focus:ring-green-500 outline-none" placeholder="ghp_... or github_pat_..." value={ghConfig.token} onChange={(e) => setGhConfig({...ghConfig, token: e.target.value})} />
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                   <div>
+                                    <label className="block text-sm text-neutral-400 mb-2">Branch</label>
+                                    <input type="text" required className="w-full bg-neutral-800 border border-neutral-700 rounded p-3 text-white focus:ring-2 focus:ring-green-500 outline-none" value={ghConfig.branch} onChange={(e) => setGhConfig({...ghConfig, branch: e.target.value})} />
+                                  </div>
+                                  <div>
+                                    <label className="block text-sm text-neutral-400 mb-2">Folder</label>
+                                    <input type="text" className="w-full bg-neutral-800 border border-neutral-700 rounded p-3 text-white focus:ring-2 focus:ring-green-500 outline-none" value={ghConfig.folder} onChange={(e) => setGhConfig({...ghConfig, folder: e.target.value})} />
+                                  </div>
+                                </div>
+                                <button type="submit" className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-4 rounded-lg">Save GitHub Config</button>
+                                
+                                <div className="pt-8 border-t border-neutral-800">
+                                    <button type="button" onClick={handleResetApp} className="flex items-center gap-2 text-red-500 text-sm font-bold hover:text-red-400">
+                                        <LogOut className="w-4 h-4" /> Reset App & Clear All Keys
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            // MAIN APP VIEW
+            return (
+                <div className="min-h-screen bg-neutral-900 text-white font-sans selection:bg-green-500/30">
+                    <div className="p-6 flex justify-between items-center bg-neutral-800/50 backdrop-blur sticky top-0 z-10 border-b border-neutral-800">
+                        <div className="flex items-center gap-2">
+                            <Flame className={`w-8 h-8 ${streakStats > 0 ? 'text-orange-500 fill-orange-500' : 'text-neutral-600'}`} />
+                            <div>
+                                <div className="text-2xl font-black tracking-tight">{streakStats}</div>
+                                <div className="text-xs text-neutral-400 font-bold uppercase tracking-wider">Day Streak</div>
+                            </div>
+                        </div>
+                        <button onClick={() => setShowSettings(true)} className="p-2 bg-neutral-800 rounded-full hover:bg-neutral-700 transition-colors">
+                            <Settings className="w-5 h-5 text-neutral-400" />
+                        </button>
+                    </div>
+
+                    <div className="max-w-md mx-auto p-6 space-y-8">
+                        <div className="text-center">
+                            <h2 className="text-neutral-400 uppercase tracking-widest text-sm font-bold">Today</h2>
+                            <p className="text-3xl font-bold text-white">{formatDateReadable(today)}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <button onClick={() => handleCheckin('exercise')} className={`relative overflow-hidden p-6 rounded-2xl flex flex-col items-center justify-center gap-3 transition-all duration-300 transform active:scale-95 ${todayData.exercise ? 'bg-green-500 text-neutral-900 shadow-[0_0_30px_-5px_rgba(34,197,94,0.4)]' : 'bg-neutral-800 text-neutral-400 border border-neutral-700 hover:bg-neutral-750'}`}>
+                                <Activity className="w-10 h-10" />
+                                <span className="font-bold text-lg">Exercise</span>
+                                {todayData.exercise && <CheckCircle2 className="absolute top-3 right-3 w-5 h-5 opacity-50" />}
+                            </button>
+                            <button onClick={() => handleCheckin('eating')} className={`relative overflow-hidden p-6 rounded-2xl flex flex-col items-center justify-center gap-3 transition-all duration-300 transform active:scale-95 ${todayData.eating ? 'bg-blue-500 text-white shadow-[0_0_30px_-5px_rgba(59,130,246,0.4)]' : 'bg-neutral-800 text-neutral-400 border border-neutral-700 hover:bg-neutral-750'}`}>
+                                <Utensils className="w-10 h-10" />
+                                <span className="font-bold text-lg">Eat Well</span>
+                                {todayData.eating && <CheckCircle2 className="absolute top-3 right-3 w-5 h-5 opacity-50" />}
+                            </button>
+                        </div>
+                        <div className="space-y-4 pt-4">
+                            <div className="flex items-center gap-2 text-neutral-400">
+                                <span className="h-px flex-1 bg-neutral-800"></span>
+                                <span className="text-xs font-bold uppercase tracking-wider">Run Thoughts</span>
+                                <span className="h-px flex-1 bg-neutral-800"></span>
+                            </div>
+                            <textarea value={postText} onChange={(e) => setPostText(e.target.value)} placeholder="How was the run? What's on your mind? (Dictate or type...)" className="w-full bg-neutral-800 border-none rounded-xl p-4 text-lg text-white placeholder-neutral-500 focus:ring-2 focus:ring-green-500 min-h-[150px] resize-none" />
+                            <button onClick={handlePublish} disabled={publishing || (!todayData.exercise && !todayData.eating && !postText)} className={`w-full py-4 rounded-xl font-bold text-lg flex items-center justify-center gap-2 transition-all ${publishing ? 'bg-neutral-700 text-neutral-400 cursor-not-allowed' : 'bg-white text-black hover:bg-neutral-200 active:scale-95 shadow-lg'}`}>
+                                {publishing ? <><Loader2 className="w-5 h-5 animate-spin" /> Committing...</> : <><Send className="w-5 h-5" /> Commit to GitHub</>}
+                            </button>
+                        </div>
+                    </div>
+                    {notification && (
+                        <div className={`fixed bottom-6 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full shadow-2xl z-50 flex items-center gap-2 font-bold text-sm whitespace-nowrap ${notification.type === 'error' ? 'bg-red-500 text-white' : 'bg-green-500 text-neutral-900'}`}>
+                            {notification.type === 'error' ? <AlertTriangle className="w-4 h-4"/> : <CheckCircle2 className="w-4 h-4"/>}
+                            {notification.msg}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
