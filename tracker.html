@@ -174,16 +174,19 @@
             const streakStats = useMemo(() => {
                 const today = getTodayString();
                 let currentStreak = 0;
-                let dateCheck = new Date();
+                let dateCheck = new Date(); // Starts at today local time
                 
                 while (true) {
-                    const dateStr = dateCheck.toISOString().split('T')[0];
+                    // Use helper to get local YYYY-MM-DD
+                    const dateStr = getFormattedDate(dateCheck);
                     const data = checkins[dateStr];
                     
                     if (data && data.exercise && data.eating) {
                         currentStreak++;
                         dateCheck.setDate(dateCheck.getDate() - 1);
                     } else if (dateStr === today) {
+                        // If today is incomplete, we don't count it, but we don't break the streak.
+                        // We check yesterday.
                         dateCheck.setDate(dateCheck.getDate() - 1);
                     } else {
                         break;
