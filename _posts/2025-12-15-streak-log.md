@@ -1,0 +1,14 @@
+---
+title: "Day 1: Run Log"
+date: 2025-12-15
+streak: 1
+tags: [run-log, health-streak]
+---
+
+Day 1 - success
+
+---
+**Daily Stats:**
+- 🔥 Streak: 1 Days
+- ✅ Exercise: Done
+- 🥗 Eating: Healthy
